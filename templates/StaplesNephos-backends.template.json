@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "ApimServiceName": {
+      "type": "string"
+    },
+    "PolicyXMLBaseUrl": {
+      "type": "string"
+    }
+  },
+  "resources": [
+    {
+      "properties": {
+        "tls": {
+          "validateCertificateChain": false,
+          "validateCertificateName": false
+        },
+        "url": "https://nephos-qa-sec.staples.com",
+        "protocol": "http"
+      },
+      "name": "[concat(parameters('ApimServiceName'), '/cad31f35cbc943c08763eae5214063f9')]",
+      "type": "Microsoft.ApiManagement/service/backends",
+      "apiVersion": "2019-01-01"
+    }
+  ]
+}

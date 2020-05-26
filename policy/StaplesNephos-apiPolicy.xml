@@ -1,0 +1,573 @@
+<!--
+    IMPORTANT:
+    - Policy elements can appear only within the <inbound>, <outbound>, <backend> section elements.
+    - To apply a policy to the incoming request (before it is forwarded to the backend service), place a corresponding policy element within the <inbound> section element.
+    - To apply a policy to the outgoing response (before it is sent back to the caller), place a corresponding policy element within the <outbound> section element.
+    - To add a policy, place the cursor at the desired insertion point and select a policy from the sidebar.
+    - To remove a policy, delete the corresponding policy statement from the policy document.
+    - Position the <base> element within a section element to inherit all policies from the corresponding section element in the enclosing scope.
+    - Remove the <base> element to prevent inheriting policies from the corresponding section element in the enclosing scope.
+    - Policies are applied in the order of their appearance, from the top down.
+    - Comments within policy elements are not supported and may disappear. Place your comments between policy elements or at a higher level scope.
+-->
+<policies>
+	<inbound>
+		<base />
+		<choose>
+			<!--  Start of Refresh Token -->
+			<when condition="@(Regex.Match(context.Request.Url.Path, "credentials/v1/refresh/token").Success)">
+				<!-- NephosOAuthTarget -->
+				<set-variable name="refreshToken" value="@{ return ((context.Request.Body.As<string>(preserveContent: true)).Replace("refresh_token=", ""));}" />
+				<cache-lookup-value key="@("RefreshToken-"+context.Variables["refreshToken"])" variable-name="cacheContent" />
+				<choose>
+					<when condition="@(context.Variables.ContainsKey("cacheContent") && context.Variables["cacheContent"] != null)">
+						<send-request mode="new" response-variable-name="authServerResponse" timeout="20" ignore-error="false">
+							<set-url>https://nephos-tier-a-qa.staples.com/token</set-url>
+							<set-method>POST</set-method>
+							<set-header name="content-type" exists-action="override">
+								<value>application/x-www-form-urlencoded</value>
+							</set-header>
+							<set-header name="Authorization" exists-action="override">
+								<value>@{ return "Basic dGVzdGNsaWVudDE6ZXdHZGlGUDRPMzNVN0ZDMQ=="; }</value>
+							</set-header>
+							<set-body>@{
+                                JObject cacheObj = JObject.Parse((string)context.Variables["cacheContent"]);
+                                StringBuilder sb = new StringBuilder("&tenant=");
+                                sb.Append(cacheObj.Property("tenant"));
+                                if(cacheObj.Property("SMSESSION") != null){
+                                    sb.Append("&grant_type=authorization_code&code=").Append(Uri.EscapeDataString((string)cacheObj.Property("SMSESSION")))
+                                    .Append("subTenant=sm");
+                                }else{
+                                    sb.Append("&grant_type=client_credentials");
+                                }
+                                return sb.ToString();                                
+                            }</set-body>
+						</send-request>
+						<set-variable name="authServerResponseBody" value="@(((IResponse)context.Variables["authServerResponse"]).Body.As<JObject>())" />
+						<!-- Start of Access token and referesh token-->
+						<cache-remove-value key="@("RefreshToken-"+context.Variables["refreshToken"])" />
+						<cache-remove-value key="@("AccessToken-"+((string)JObject.Parse((string)context.Variables["cacheContent"]).Property("accessTokenId")))" />
+						<set-variable name="refreshTokenId" value="@(Guid.NewGuid().ToString())" />
+						<set-variable name="accessTokenId" value="@(Guid.NewGuid().ToString())" />
+						<set-variable name="cacheContent" value="@{
+                            JObject cacheObj = JObject.Parse((string)context.Variables["cacheContent"]);
+                            JObject authServerResp = (JObject)context.Variables["authServerResponseBody"];
+                            cacheObj["access_token"] = authServerResp["access_token"];
+                            cacheObj["sub"] = authServerResp["sub"];
+                            cacheObj["tenant"] = authServerResp["tenant"];
+                            cacheObj.Property("refreshTokenId").Remove();
+                            cacheObj.Property("accessTokenId").Remove();
+                            cacheObj.Add("refreshTokenId", (string)context.Variables["refreshTokenId"]);
+                            cacheObj.Add("accessTokenId", (string) context.Variables["accessTokenId"]);
+                            return cacheObj.ToString();                        
+                        }" />
+						<cache-store-value key="@("AccessToken-"+context.Variables["accessTokenId"])" value="@((string)context.Variables["cacheContent"])" duration="1795" />
+						<cache-store-value key="@("RefreshToken-"+context.Variables["refreshTokenId"])" value="@((string)context.Variables["cacheContent"])" duration="14400" />
+						<return-response>
+							<set-status code="200" reason="Ok" />
+							<set-header name="content-type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>@{
+                                    DateTimeOffset now = DateTimeOffset.UtcNow;
+                                    JObject resBody = new JObject();
+                                    resBody.Add("access_token" , (string)context.Variables["accessTokenId"]);
+                                    resBody.Add("token_type" , "BearerToken");
+                                    resBody.Add("expires_in" , "1739");
+                                    resBody.Add("refresh_token" , (string)context.Variables["refreshTokenId"]);
+                                    resBody.Add("refresh_token_expires_in" , "14399");
+                                    resBody.Add("refresh_token_issued_at", now.ToUnixTimeMilliseconds());
+                                    resBody.Add("sub" , (string)context.Variables.GetValueOrDefault<JObject>("authServerResponseBody")["sub"]);
+                                    resBody.Add("tenant" , (string)context.Variables.GetValueOrDefault<JObject>("authServerResponseBody")["tenant"]);
+                                    return resBody.ToString();  
+                                }</set-body>
+						</return-response>
+					</when>
+					<otherwise>
+						<return-response>
+							<set-status code="401" />
+							<set-header name="content-type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>{ "errorCode": 401, "errorMsg" : "The access token is invalid, could not access this resource!" }</set-body>
+						</return-response>
+					</otherwise>
+				</choose>
+				<!-- End of Access token and referesh token -->
+			</when>
+			<!--  End of  Refresh Token -->
+			<!--  Start of Identity -->
+			<when condition="@(Regex.Match(context.Request.Url.Path, "idm/api/identityProxy").Success)">
+				<!-- IdentityProxy -->
+				<set-variable name="baseURL" value="https://170.37.109.2/" />
+			</when>
+			<!--  End of Identity -->
+			<!--  Start of LoggedIn -->
+			<when condition="@(Regex.Match(context.Request.Url.Path, "credentials/v1/loggedin").Success)">
+				<set-variable name="SMSESSION" value="@(context.Request.Headers.GetValueOrDefault("SMSESSION",""))" />
+				<choose>
+					<when condition="@(!context.Variables.ContainsKey("SMSESSION"))">
+						<return-response>
+							<set-status code="400" />
+							<set-header name="content-type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>{ "errorCode": 400, "errorMsg" : "The field 'SMSESSION' can't be empty, Please provide valid 'SMSESSION' header!" }</set-body>
+						</return-response>
+					</when>
+					<otherwise>
+						<set-variable name="tenant" value="@(context.Request.Url.Query.GetValueOrDefault("tenantId",""))" />
+						<set-variable name="tenant" value="@{
+                            return context.Variables["tenant"] == null ? context.Request.Headers.GetValueOrDefault("tenantId") : (string) context.Variables["tenant"];
+                        }" />
+						<set-variable name="tenant" value="@{
+                            return context.Variables["tenant"] == null ? "DOTCOM" : (string) context.Variables["tenant"];
+                        }" />
+						<set-variable name="authServerReqPayLoad" value="@{
+                            return "grant_type=authorization_code" +
+                            "&code="+ Uri.EscapeDataString((string)context.Variables["SMSESSION"]) +
+                            "&tenant=" + (string)context.Variables["tenant"] +
+                            "&subTenant=sm&non_prod_env=" + context.Request.Headers.GetValueOrDefault("env") +
+                            "&context_id=" + context.Request.Headers.GetValueOrDefault("context_id");                                
+                        }" />
+						<send-request mode="new" response-variable-name="authServerResponse" timeout="20" ignore-error="false">
+							<set-url>https://nephos-tier-a-qa.staples.com/token</set-url>
+							<set-method>POST</set-method>
+							<set-header name="content-type" exists-action="override">
+								<value>application/x-www-form-urlencoded</value>
+							</set-header>
+							<set-header name="Authorization" exists-action="override">
+								<value>@{ return "Basic dGVzdGNsaWVudDE6ZXdHZGlGUDRPMzNVN0ZDMQ=="; }</value>
+							</set-header>
+							<set-body>@{ return (string) context.Variables["authServerReqPayLoad"]; }</set-body>
+						</send-request>
+						<set-variable name="authServerResponseBody" value="@(((IResponse)context.Variables["authServerResponse"]).Body.As<JObject>())" />
+						<!-- Start of Access token and referesh token-->
+						<set-variable name="refreshTokenId" value="@(Guid.NewGuid().ToString())" />
+						<set-variable name="accessTokenId" value="@(Guid.NewGuid().ToString())" />
+						<set-variable name="cacheContent" value="@{
+                            JObject cacheObj = new JObject();
+                            JObject authServerResp = (JObject)context.Variables["authServerResponseBody"];
+                            cacheObj.Add("tenant" , (string)context.Variables["tenant"]);
+                            cacheObj.Add("sub", authServerResp["sub"]);
+                            cacheObj.Add("access_token", authServerResp["access_token"]);
+                            cacheObj.Add("refreshTokenId", (string)context.Variables["refreshTokenId"]);
+                            cacheObj.Add("accessTokenId", (string) context.Variables["accessTokenId"]);
+                            return cacheObj.ToString();                        
+                        }" />
+						<cache-store-value key="@("AccessToken-"+context.Variables["accessTokenId"])" value="@((string)context.Variables["cacheContent"])" duration="1795" />
+						<cache-store-value key="@("RefreshToken-"+context.Variables["refreshTokenId"])" value="@((string)context.Variables["cacheContent"])" duration="14400" />
+						<!-- End of Access token and referesh token -->
+						<return-response>
+							<set-status code="200" reason="Ok" />
+							<set-header name="content-type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>@{
+                                    DateTimeOffset now = DateTimeOffset.UtcNow;
+                                    JObject resBody = new JObject();
+                                    resBody.Add("access_token" , (string)context.Variables["accessTokenId"]);
+                                    resBody.Add("token_type" , "BearerToken");
+                                    resBody.Add("expires_in" , "1739");
+                                    resBody.Add("refresh_token" , (string)context.Variables["refreshTokenId"]);
+                                    resBody.Add("refresh_token_expires_in" , "14399");
+                                    resBody.Add("refresh_token_issued_at", now.ToUnixTimeMilliseconds());
+                                    return resBody.ToString();  
+                                }</set-body>
+						</return-response>
+					</otherwise>
+				</choose>
+			</when>
+			<!--  End of LoggedIn -->
+			<!--  Start of Login -->
+			<when condition="@(Regex.Match(context.Request.Url.Path, "credentials/v1/login").Success 
+                || Regex.Match(context.Request.Url.Path, "credentials/v1/guestauth/token").Success)">
+				<choose>
+					<when condition="@(context.Request.Method.Equals("POST"))">
+						<!--  Start of verifying login, username and password or present -->
+						<choose>
+							<when condition="@(context.Request.Body != null)">
+								<set-variable name="requestJObject" value="@(context.Request.Body.As<JObject>(preserveContent: true))" />
+							</when>
+						</choose>
+						<choose>
+							<when condition="@(Regex.Match(context.Request.Url.Path, "credentials/v1/login").Success && context.Variables.ContainsKey("requestJObject") &&
+                                (context.Variables.GetValueOrDefault<JObject>("requestJObject")["username"] == null || context.Variables.GetValueOrDefault<JObject>("requestJObject")["password"] == null))">
+								<return-response>
+									<set-status code="400" />
+									<set-header name="content-type" exists-action="override">
+										<value>application/json</value>
+									</set-header>
+									<set-body>{
+                                        "status": "405",
+                                        "message": "Login Failed: missing properties 'Username' and 'password'."
+                                        }</set-body>
+								</return-response>
+							</when>
+						</choose>
+						<!--  End of verifying login, username and password or present -->
+						<!--  Start of setting up initial values -->
+						<set-variable name="clientId" value="@(context.Request.Headers.GetValueOrDefault("client_id",""))" />
+						<set-variable name="contextId" value="@(context.Request.Headers.GetValueOrDefault("context_id",""))" />
+						<set-variable name="Host" value="@(context.Request.Headers.GetValueOrDefault("Host"))" />
+						<set-variable name="getWCS" value="@(context.Request.Url.Query.GetValueOrDefault("getWCS",""))" />
+						<set-variable name="tenant" value="@(context.Request.Url.Query.GetValueOrDefault("tenantId",""))" />
+						<set-variable name="grant_type" value="authorization_code" />
+						<set-variable name="non_prod_env" value="@(context.Request.Headers.GetValueOrDefault("env"))" />
+						<set-variable name="clientName" value="@(context.Product.Name)" />
+						<choose>
+							<when condition="@(context.Variables.GetValueOrDefault<string>("tenant") == null)">
+								<set-variable name="tenant" value="@(context.Request.Headers.GetValueOrDefault("tenantId",""))" />
+							</when>
+						</choose>
+						<!--  End of setting up initial values -->
+						<!--  Start of CreatingRequestPayload -->
+						<set-variable name="appName" value="gpdotcom" />
+						<set-variable name="storeId" value="10001" />
+						<!--  Start of setting appName, storeID, tenant -->
+						<choose>
+							<when condition="@(context.Variables.GetValueOrDefault<string>("tenant").Equals("STAPLESCA", StringComparison.OrdinalIgnoreCase))">
+								<set-variable name="appName" value="gpdotca" />
+								<set-variable name="storeId" value="20001" />
+								<set-variable name="isCaUser" value="@(true)" />
+							</when>
+							<when condition="@(context.Variables.GetValueOrDefault<string>("tenant").Equals("SBA", StringComparison.OrdinalIgnoreCase))">
+								<set-variable name="appName" value="gpsba" />
+								<set-variable name="storeId" value="10101" />
+							</when>
+							<otherwise>
+								<set-variable name="tenant" value="DOTCOM" />
+							</otherwise>
+						</choose>
+						<!--  End of setting appName, storeID, tenant -->
+						<!--  Start of making SM flow for login -->
+						<choose>
+							<when condition="@(Regex.Match(context.Request.Url.Path, "credentials/v1/login").Success)">
+								<set-variable name="updatedRequestPayload" value="@("username=" + context.Variables.GetValueOrDefault<JObject>("requestJObject")["username"] + "&password=" + context.Variables.GetValueOrDefault<JObject>("requestJObject")["password"]+ "&appName=" + context.Variables.GetValueOrDefault<string>("appName"))" />
+								<set-variable name="req_username" value="@(context.Variables.GetValueOrDefault<JObject>("requestJObject")["username"])" />
+								<set-variable name="req_password" value="@(context.Variables.GetValueOrDefault<JObject>("requestJObject")["password"])" />
+								<set-variable name="req_appName" value="@(context.Variables.GetValueOrDefault<string>("appName"))" />
+								<send-request mode="new" response-variable-name="ssorestResponse" timeout="20" ignore-error="false">
+									<set-url>https://letmein.staples.com/ssorest/service/public/login</set-url>
+									<set-method>POST</set-method>
+									<set-header name="content-type" exists-action="override">
+										<value>application/x-www-form-urlencoded</value>
+									</set-header>
+									<set-body>@{return context.Variables.GetValueOrDefault<string>("updatedRequestPayload");}</set-body>
+								</send-request>
+								<set-variable name="smResponseObj" value="@{
+                                        string smCookieValue = ((IResponse)context.Variables["ssorestResponse"]).Headers.GetValueOrDefault("Set-Cookie", "");
+                                        if(smCookieValue != null && smCookieValue.Length > 0)
+                                        {
+                                            string[] properties = smCookieValue.Split(';');
+                                            StringBuilder sb = new StringBuilder();
+                                            sb.Append('{');
+                                            foreach (string prop in properties){
+                                                string[] tup = prop.Split('=');
+                                                sb.Append('"').Append(tup[0].Trim()).Append('"').Append(':').Append('"').Append(prop.Substring(tup[0].Length + 1)).Append('"').Append(',');
+                                            }
+                                            sb.Append('}'); 
+                                            return JObject.Parse(sb.ToString());                                            
+                                        }
+                                    return null;
+
+                                }" />
+							</when>
+						</choose>
+						<!--  End of making SM flow for login -->
+						<!--  End of CreatingRequestPayload -->
+						<!-- Start of Nephose OAuth request -->
+						<choose>
+							<when condition="@(Regex.Match(context.Request.Url.Path, "credentials/v1/login").Success && 
+                                context.Variables.ContainsKey("smResponseObj")  && 
+                                context.Variables.GetValueOrDefault<JObject>("smResponseObj") != null)">
+								<!-- Need to implement CreatingContextIDforGuest, RetrieveClientCredentials, SetUsernamePassword-->
+								<set-variable name="authServerReqPayLoad" value="@{
+                                    return "grant_type=" + context.Variables.GetValueOrDefault<string>("grant_type") +
+                                    "&code="+ Uri.EscapeDataString((string)context.Variables.GetValueOrDefault<JObject>("smResponseObj")["SMSESSION"]) +
+                                    "&tenant=" + (string)context.Variables["tenant"] +
+                                    "&subTenant=sm&non_prod_env=" + context.Variables.GetValueOrDefault<string>("non_prod_env");                                
+                                }" />
+							</when>
+							<when condition="@(Regex.Match(context.Request.Url.Path, "credentials/v1/guestauth/token").Success)">
+								<!-- Need to implement CreatingContextIDforGuest, RetrieveClientCredentials, SetUsernamePassword-->
+								<set-variable name="authServerReqPayLoad" value="@{
+                                    return "grant_type=client_credentials" +
+                                    "&tenant=" + (string)context.Variables["tenant"] +
+                                    "&non_prod_env=" + context.Variables.GetValueOrDefault<string>("non_prod_env");                           
+                                }" />
+							</when>
+							<otherwise>
+								<return-response>
+									<set-status code="403" />
+									<set-header name="content-type" exists-action="override">
+										<value>application/json</value>
+									</set-header>
+									<set-body>{
+                                        "status": "401",
+                                        "message": "Incorrect username or password entered. Please try again.".
+                                        }</set-body>
+								</return-response>
+							</otherwise>
+						</choose>
+						<send-request mode="new" response-variable-name="authServerResponse" timeout="20" ignore-error="false">
+							<set-url>https://nephos-tier-a-qa.staples.com/token</set-url>
+							<set-method>POST</set-method>
+							<set-header name="content-type" exists-action="override">
+								<value>application/x-www-form-urlencoded</value>
+							</set-header>
+							<set-header name="Authorization" exists-action="override">
+								<value>@{ return "Basic dGVzdGNsaWVudDE6ZXdHZGlGUDRPMzNVN0ZDMQ=="; }</value>
+							</set-header>
+							<set-body>@{ return (string) context.Variables["authServerReqPayLoad"]; }</set-body>
+						</send-request>
+						<set-variable name="authServerResponseBody" value="@(((IResponse)context.Variables["authServerResponse"]).Body.As<JObject>())" />
+						<!-- Start of Access token and referesh token-->
+						<set-variable name="refreshTokenId" value="@(Guid.NewGuid().ToString())" />
+						<set-variable name="accessTokenId" value="@(Guid.NewGuid().ToString())" />
+						<set-variable name="cacheContent" value="@{
+                            JObject cacheObj = new JObject();
+                            if(context.Variables.ContainsKey("smResponseObj")){
+                                cacheObj = (JObject)context.Variables["smResponseObj"];                                
+                            }else{
+                                cacheObj = new JObject();
+                            }                            
+                            JObject authServerResp = (JObject)context.Variables["authServerResponseBody"];
+                            cacheObj.Add("tenant" , (string)context.Variables["tenant"]);
+                            cacheObj.Add("sub", authServerResp["sub"]);
+                            cacheObj.Add("access_token", authServerResp["access_token"]);
+                            cacheObj.Add("refreshTokenId", (string)context.Variables["refreshTokenId"]);
+                            cacheObj.Add("accessTokenId", (string) context.Variables["accessTokenId"]);
+                            return cacheObj.ToString();                        
+                        }" />
+						<cache-store-value key="@("AccessToken-"+context.Variables["accessTokenId"])" value="@((string)context.Variables["cacheContent"])" duration="1795" />
+						<cache-store-value key="@("RefreshToken-"+context.Variables["refreshTokenId"])" value="@((string)context.Variables["cacheContent"])" duration="14400" />
+						<!-- End of Access token and referesh token -->
+						<return-response>
+							<set-status code="200" reason="Ok" />
+							<set-header name="content-type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>@{
+                                    //return JsonConvert.SerializeObject(context.Variables["authServerResponseBody"]);
+                                    DateTimeOffset now = DateTimeOffset.UtcNow;
+                                    JObject resBody = new JObject();
+                                    resBody.Add("access_token" , (string)context.Variables["accessTokenId"]);
+                                    resBody.Add("token_type" , "BearerToken");
+                                    resBody.Add("expires_in" , "1739");
+                                    resBody.Add("refresh_token" , (string)context.Variables["refreshTokenId"]);
+                                    resBody.Add("refresh_token_expires_in" , "14399");
+                                    resBody.Add("refresh_token_issued_at", now.ToUnixTimeMilliseconds());
+                                    resBody.Add("sub" , (string)context.Variables.GetValueOrDefault<JObject>("authServerResponseBody")["sub"]);
+                                    resBody.Add("tenant" , (string)context.Variables.GetValueOrDefault<JObject>("authServerResponseBody")["tenant"]);
+                                    return resBody.ToString();  
+                                }</set-body>
+						</return-response>
+						<!-- End of Nephose OAuth request -->
+					</when>
+					<otherwise>
+						<return-response>
+							<set-status code="405" />
+							<set-header name="content-type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>{
+                                "status": "405",
+                                "message": "Only post method allowed on path '/login'".
+                            }</set-body>
+						</return-response>
+					</otherwise>
+				</choose>
+			</when>
+			<!--  End of Login -->
+			<!--  Start of Logout -->
+			<when condition="@(Regex.Match(context.Request.Url.Path, "credentials/v1/logout").Success)">
+				<choose>
+					<when condition="@(context.Request.Method.Equals("DELETE"))">
+						<set-variable name="accessToken" value="@(context.Request.Headers.GetValueOrDefault("Authorization","scheme param").Replace("Bearer ", ""))" />
+						<choose>
+							<when condition="@(context.Variables.ContainsKey("accessToken"))">
+								<cache-remove-value key="@("AccessToken-"+context.Variables["accessToken"])" />
+								<return-response>
+									<set-status code="200" />
+									<set-header name="content-type" exists-action="override">
+										<value>application/json</value>
+									</set-header>
+									<set-body>{ "Msg" : "You have successfully logged out!" }</set-body>
+								</return-response>
+							</when>
+							<otherwise>
+								<return-response>
+									<set-status code="401" />
+									<set-header name="content-type" exists-action="override">
+										<value>application/json</value>
+									</set-header>
+									<set-body>{
+                                        "errorCode": 401,
+                                        "errorMsg" : "The access token is invalid, could not access this resource!"
+                                        }</set-body>
+								</return-response>
+							</otherwise>
+						</choose>
+					</when>
+					<otherwise>
+						<return-response>
+							<set-status code="405" />
+							<set-header name="content-type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>{
+                                "status": "405",
+                                "message": "Only DELETE method allowed on path '/logout'".
+                            }</set-body>
+						</return-response>
+					</otherwise>
+				</choose>
+			</when>
+			<!--  End of Logout -->
+			<!--  Start of Authorized user to make Service Calls -->
+			<otherwise>
+				<set-variable name="accessToken" value="@(context.Request.Headers.GetValueOrDefault("Authorization","scheme param").Replace("Bearer ", ""))" />
+				<cache-lookup-value key="@("AccessToken-"+context.Variables["accessToken"])" variable-name="cacheContent" />
+				<choose>
+					<when condition="@(context.Variables.ContainsKey("cacheContent") && context.Variables["cacheContent"] != null)">
+						<set-variable name="cacheObj" value="@(JObject.Parse((string)context.Variables["cacheContent"]))" />
+						<choose>
+							<!--  Start of Orchestration -->
+							<when condition="@(Regex.Match(context.Request.Url.Path, "gp-orchestration/v1/").Success)">
+								<!-- arkeTarget -->
+								<set-variable name="baseURL" value="@{
+                                    StringBuilder url = new StringBuilder("https://170.37.109.2/");                                   
+                                    string reqPath = context.Request.Url.Path;
+                                    string arkenew = context.Request.Headers.GetValueOrDefault("x-arke-new","");
+                                    string pathToAppend = "gp";
+                                    if(arkenew != ""){
+                                        pathToAppend = "cc";
+                                    }
+                                    int index = reqPath.IndexOf("/api");
+                                    url.Append(pathToAppend).Append(reqPath.Substring(index)).Append("?ClientName=Nephos-NonProd");                                    
+                                    return url.ToString();
+                                }" />
+								<set-header name="SMSESSION" exists-action="override">
+									<value>@{ return Uri.UnescapeDataString((string)((JObject)context.Variables["cacheObj"]).Property("SMSESSION"));}</value>
+								</set-header>
+							</when>
+							<!--  End of Orchestration -->
+							<!--  Start of Replenish -->
+							<when condition="@(Regex.Match(context.Request.Url.Path, "gp-replenish/").Success)">
+								<!-- replenishTarget -->
+								<set-header name="Cookie" exists-action="override">
+									<value>@{ return "SMSESSION=" + (string)((JObject)context.Variables["cacheObj"]).Property("SMSESSION"); }</value>
+								</set-header>
+								<set-header name="client_id" exists-action="override">
+									<value>@{return context.Subscription.Name != null ? context.Subscription.Name.Replace(" ", "-") : "staples-nephos";}</value>
+								</set-header>
+								<set-header name="userid" exists-action="override">
+									<value>@{return (string)((JObject)context.Variables["cacheObj"]).Property("sub");}</value>
+								</set-header>
+								<set-variable name="baseURL" value="@{
+                                    StringBuilder url = new StringBuilder("https://170.37.109.2/replenish");   //170.37.106.2
+                                    string reqPath = context.Request.Url.Path;
+                                    int index = reqPath.IndexOf("/v1");
+                                    if(index == -1){
+                                        index = reqPath.IndexOf("/v2");
+                                    }
+                                    url.Append(reqPath.Substring(index)).Append("?channel=Nephos-NonProd");//Need to add chaneel based on consumer
+                                    return url.ToString();                                    
+                                }" />
+							</when>
+							<!--  End of Replenish -->
+							<!--  Start of IDM It's deprecated remove it-->
+							<when condition="@(Regex.Match(context.Request.Url.Path, "gp-idm/v1/").Success)">
+								<!-- IDMTarget/IDMTargetCA -->
+								<!-- <set-variable name="baseURL" value="https://170.37.109.2/d" /> -->
+								<set-variable name="baseURL" value="@{
+                                    string reqPath = context.Request.Url.Path;
+                                    int index = reqPath.IndexOf("/personalinfo");
+                                    StringBuilder url = new StringBuilder("https://170.37.109.2");
+                                    return url.Append(reqPath.Substring(index)).ToString();
+                                }" />
+							</when>
+							<!--  End of IDM -->
+							<!--  Start of PaymentGatewayPCITarget & NephosNonPCITarget-->
+							<when condition="@(Regex.Match(context.Request.Url.Path, "gp-api-tierc-payment-gateway").Success || 
+                                Regex.Match(context.Request.Url.Path, "gp-api-tierb-payment-gateway").Success || Regex.Match(context.Request.Url.Path, "gp-account-svc/v1").Success)">
+								<!-- NephosNonPCITarget -->
+								<set-variable name="baseURL" value="@("https://nephos-tier-a-qa.staples.com/" + context.Request.Url.Path)" />
+							</when>
+							<!--  End of PaymentGatewayPCITarget & NephosNonPCITarget-->
+							<!--  Default fall back on Nephos -->
+							<otherwise>
+								<set-variable name="baseURL" value="@("https://170.37.109.2/nephos-tiera/" + context.Request.Url.Path)" />
+							</otherwise>
+							<!--  End of Default fall back on Nephos -->
+						</choose>
+						<!--  After construing requied info calling Backend  -->
+						<send-request mode="copy" response-variable-name="finalServiceCallResp" timeout="2000" ignore-error="false">
+							<set-url>@((string)context.Variables["baseURL"])</set-url>
+							<set-header name="Authorization" exists-action="override">
+								<value>@{ return "Bearer " +  (string)((JObject)context.Variables["cacheObj"]).Property("access_token");}</value>
+							</set-header>
+						</send-request>
+						<set-variable name="serviceRespBody" value="@(((IResponse)context.Variables["finalServiceCallResp"]).Body.As<string>())" />
+						<return-response>
+							<set-status code="@(((IResponse)context.Variables["finalServiceCallResp"]).StatusCode)" />
+							<set-header name="Content-Type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>@{ return (string) context.Variables["serviceRespBody"]; }</set-body>
+						</return-response>
+						<!--  End of calling Backend  -->
+					</when>
+					<!--  If use session expires  -->
+					<otherwise>
+						<return-response>
+							<set-status code="401" />
+							<set-header name="content-type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-body>{ "errorCode": 401, "errorMsg" : "The access token is invalid, could not access this resource!" }</set-body>
+						</return-response>
+					</otherwise>
+					<!--  End of use session expires  -->
+				</choose>
+			</otherwise>
+			<!--  End of Authorized user to make Service Calls -->
+		</choose>
+		<set-backend-service base-url="@((string)context.Variables["baseURL"])" />
+	</inbound>
+	<backend>
+		<base />
+	</backend>
+	<outbound>
+		<base />
+	</outbound>
+	<on-error>
+		<base />
+		<set-variable name="ErrorMessage" value="@(context.LastError.Message)" />
+		<set-variable name="ErrorScope" value="@(context.LastError.Scope)" />
+		<set-variable name="ErrorSection" value="@(context.LastError.Section)" />
+		<set-variable name="ErrorPath" value="@(context.LastError.Path)" />
+		<set-variable name="ErrorPolicyId" value="@(context.LastError.PolicyId)" />
+		<set-variable name="ErrorReason" value="@(context.LastError.Reason)" />
+		<set-variable name="ErrorSource" value="@(context.LastError.Source)" />
+		<set-variable name="Errorstatuscode" value="@(context.Response.StatusCode)" />
+		<return-response>
+			<set-status code="@(context.Response.StatusCode)" />
+			<set-header name="Content-Type" exists-action="override">
+				<value>application/json</value>
+			</set-header>
+			<set-body template="liquid">                      
+            {
+                "Errorstatuscode" : "{{@(context.Response.StatusCode)}}",
+                "ErrorScope" : "{{context.Variables["ErrorScope"]}}",
+                "ErrorSection" : "{{context.Variables["ErrorSection"]}}",
+                "ErrorPath" : "{{context.Variables["ErrorPath"]}}",
+                "ErrorPolicyId" : "{{context.Variables["ErrorPolicyId"]}}",
+                "ErrorReason" : "{{context.Variables["ErrorReason"]}}",
+                "ErrorSource" : "{{context.Variables["ErrorSource"]}}",
+                "ErrorMessage" : "{{context.Variables["ErrorMessage"]}}"
+            }</set-body>
+		</return-response>
+	</on-error>
+</policies>
